@@ -9,6 +9,7 @@ import android.os.HandlerThread;
 import android.os.SystemClock;
 
 import java.nio.ByteBuffer;
+import org.telegram.messenger.CrashLogger;
 
 public class MP4FileVideoCapturer implements VideoCapturer {
     private final Context context;
@@ -22,6 +23,8 @@ public class MP4FileVideoCapturer implements VideoCapturer {
     private long durationMs = 10000;
     private long startTimeMs = 0;
     private static final int TARGET_W = 320;
+    private int frameCount = 0;
+    private int tickCount = 0;
 
     public MP4FileVideoCapturer(Context context, Uri videoUri) {
         this.context = context.getApplicationContext();
@@ -30,6 +33,7 @@ public class MP4FileVideoCapturer implements VideoCapturer {
 
     @Override
     public void initialize(SurfaceTextureHelper ste, Context ctx, CapturerObserver obs) {
+        CrashLogger.log("D", "MP4FC.initialize", null);
         this.capturerObserver = obs;
         thread = new HandlerThread("MP4FileVideoCapturer");
         thread.start();
@@ -40,20 +44,22 @@ public class MP4FileVideoCapturer implements VideoCapturer {
     public void startCapture(int w, int h, int fps) {
         if (isRunning || isDisposed) return;
         isRunning = true;
+        CrashLogger.log("D", "MP4FC.startCapture", null);
         handler.post(this::initAndStart);
     }
 
     private void initAndStart() {
         try {
+            CrashLogger.log("D", "MP4FC.initAndStart", null);
             retriever = new MediaMetadataRetriever();
             retriever.setDataSource(context, videoUri);
             String dur = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
             durationMs = dur != null ? Long.parseLong(dur) : 10000;
             startTimeMs = SystemClock.elapsedRealtime();
-            Logging.d("MP4FileVideoCapturer", "duration=" + durationMs + "ms");
+            CrashLogger.log("D", "MP4FC duration=" + durationMs + "ms", null);
             scheduleNext();
         } catch (Exception e) {
-            Logging.e("MP4FileVideoCapturer", "init failed", e);
+            CrashLogger.log("E", "MP4FC init failed", e);
         }
     }
 
@@ -71,12 +77,16 @@ public class MP4FileVideoCapturer implements VideoCapturer {
                 elapsed = 0;
             }
             Bitmap bmp = retriever.getFrameAtTime(elapsed * 1000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+            tickCount++;
+            if (tickCount % 5 == 0) {
+                CrashLogger.log("D", "MP4FC.tick #" + tickCount + " elapsed=" + elapsed + "ms bmp=" + (bmp != null ? (bmp.getWidth()+"x"+bmp.getHeight()) : "null"), null);
+            }
             if (bmp != null) {
                 deliverBitmap(bmp);
                 bmp.recycle();
             }
         } catch (Exception e) {
-            Logging.e("MP4FileVideoCapturer", "tick failed", e);
+            CrashLogger.log("E", "MP4FC tick failed", e);
         }
         scheduleNext();
     }
@@ -116,13 +126,17 @@ public class MP4FileVideoCapturer implements VideoCapturer {
                 }
             }
 
+            frameCount++;
+            if (frameCount % 10 == 0) {
+                CrashLogger.log("D", "MP4FC.deliver #" + frameCount + " " + w + "x" + h, null);
+            }
             VideoFrame frame = new VideoFrame(i420, 0, SystemClock.elapsedRealtimeNanos());
             if (capturerObserver != null) capturerObserver.onFrameCaptured(frame);
             frame.release();
             i420.release();
             if (scaled != bmp) scaled.recycle();
         } catch (Exception e) {
-            Logging.e("MP4FileVideoCapturer", "deliver failed", e);
+            CrashLogger.log("E", "MP4FC deliver failed", e);
         }
     }
 
@@ -134,6 +148,7 @@ public class MP4FileVideoCapturer implements VideoCapturer {
 
     @Override
     public void dispose() {
+        CrashLogger.log("D", "MP4FC.dispose", null);
         isDisposed = true;
         isRunning = false;
         if (thread != null) { thread.quitSafely(); thread = null; }

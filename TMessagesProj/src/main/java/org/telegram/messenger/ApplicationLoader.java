@@ -283,6 +283,7 @@ public class ApplicationLoader extends Application {
 
     @Override
     public void onCreate() {
+        org.telegram.messenger.CrashLogger.init(this);
         applicationLoaderInstance = this;
         try {
             applicationContext = getApplicationContext();
