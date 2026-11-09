@@ -30,7 +30,7 @@ jobs:
         rm -f TMessagesProj/config/release.keystore
         keytool -genkey -v -keystore TMessagesProj/config/release.keystore -alias androidkey -keyalg RSA -keysize 2048 -validity 10000 -storepass 123456 -keypass 123456 -dname "CN=Telegram, OU=Telegram, O=Telegram, L=Cairo, S=Cairo, C=EG"
         echo '{"project_info":{"project_number":"1","project_id":"1","storage_bucket":"1"},"client":[{"client_info":{"mobilesdk_app_id":"1","android_client_info":{"package_name":"org.telegram.messenger"}},"oauth_client":[],"api_key":[{"current_key":"1"}],"services":{"appinvite_service":{"other_platform_oauth_client":[]}}}]}' > TMessagesProj/google-services.json
-        echo "RELEASE_STORE_FILE=TMessagesProj/config/release.keystore" > gradle.properties
+        echo "RELEASE_STORE_FILE=TMessagesProj/config/release.keystore" >> gradle.properties
         echo "RELEASE_STORE_PASSWORD=123456" >> gradle.properties
         echo "RELEASE_KEY_ALIAS=androidkey" >> gradle.properties
         echo "RELEASE_KEY_PASSWORD=123456" >> gradle.properties
