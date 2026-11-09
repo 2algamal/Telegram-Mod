@@ -5899,4 +5899,10 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 		public boolean cameraAlertWasShowed;
 		public boolean wasVideoCall;
 	}
+
+    // === PiP stubs (Telegram-Virtual) ===
+    public void addExtraLocalSink(org.webrtc.VideoSink sink) {}
+    public void removeExtraLocalSink(org.webrtc.VideoSink sink) {}
+    public boolean addExtraRemoteSink(org.telegram.tgnet.TLRPC.GroupCallParticipant participant, boolean presentation, org.webrtc.VideoSink sink) { return false; }
+    public void removeExtraRemoteSink(org.telegram.tgnet.TLRPC.GroupCallParticipant participant, boolean presentation, org.webrtc.VideoSink sink) {}
 }
