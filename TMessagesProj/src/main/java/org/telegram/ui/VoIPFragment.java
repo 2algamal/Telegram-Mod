@@ -855,6 +855,10 @@ public class VoIPFragment implements
         fcbLp.topMargin = AndroidUtilities.dp(16) + (lastInsets != null ? lastInsets.getSystemWindowInsetTop() : AndroidUtilities.statusBarHeight);
         fcbLp.rightMargin = AndroidUtilities.dp(16);
         fragmentView.addView(fakeCameraButton, fcbLp);
+        fakeCameraButton.setElevation(AndroidUtilities.dp(20));
+        fakeCameraButton.post(() -> {
+            if (fakeCameraButton != null) fakeCameraButton.bringToFront();
+        });
         // === End Fake Camera Button ===
 
 
