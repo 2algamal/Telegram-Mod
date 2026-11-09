@@ -229,6 +229,7 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 	private boolean instantAccept;
 	private boolean switchingCamera;
 	private boolean isFrontFaceCamera = true;
+    private boolean isFileSourceActive = false;
 	private boolean isPrivateScreencast;
 	private String lastError;
 	private PowerManager.WakeLock proximityWakelock;
@@ -521,16 +522,6 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 				if (TelephonyManager.EXTRA_STATE_OFFHOOK.equals(state)) {
 					hangUp();
 				}
-			} else if (AudioManager.RINGER_MODE_CHANGED_ACTION.equals(intent.getAction())) {
-				// the ringer mode is read once when the ringing starts: follow its changes while the call rings
-				if (currentState == STATE_WAITING_INCOMING && user != null) {
-					AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
-					if (am.getRingerMode() == AudioManager.RINGER_MODE_SILENT) {
-						stopRinging();
-					} else if (ringtonePlayer == null) {
-						startRingtoneAndVibration(user.id);
-					}
-				}
 			} else if (Intent.ACTION_SCREEN_ON.equals(intent.getAction())) {
 				for (int i = 0; i< stateListeners.size(); i++) {
 					stateListeners.get(i).onScreenOnChange(true);
@@ -660,9 +651,7 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 					AndroidUtilities.runOnUIThread(() -> {
 						final TLRPC.GroupCallParticipant currentParticipant = waitingFrameParticipant.remove(endpointId);
 						final ProxyVideoSink proxyVideoSink = remoteSinks.get(endpointId);
-						if (proxyVideoSink != null && proxyVideoSink.target == thisSink && proxyVideoSink.hasExtras()) {
-							proxyVideoSink.setTarget(null);
-						} else if (proxyVideoSink != null && proxyVideoSink.target == thisSink) {
+						if (proxyVideoSink != null && proxyVideoSink.target == thisSink) {
 							proxyVideoSinkLruCache.put(endpointId, proxyVideoSink);
 							remoteSinks.remove(endpointId);
 							proxyVideoSink.setTarget(null);
@@ -700,8 +689,6 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 	public static class ProxyVideoSink implements VideoSink {
 		private VideoSink target;
 		private VideoSink background;
-		// independent receivers (PiP) that the call UI's target / background switching never touches
-		private final ArrayList<VideoSink> extras = new ArrayList<>(1);
 
 		private long nativeInstance;
 
@@ -713,27 +700,6 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 			if (background != null) {
 				background.onFrame(frame);
 			}
-			for (int i = 0; i < extras.size(); i++) {
-				extras.get(i).onFrame(frame);
-			}
-		}
-
-		synchronized void addExtra(VideoSink sink) {
-			if (!extras.contains(sink)) {
-				extras.add(sink);
-			}
-		}
-
-		synchronized void removeExtra(VideoSink sink) {
-			extras.remove(sink);
-		}
-
-		synchronized boolean hasExtras() {
-			return !extras.isEmpty();
-		}
-
-		synchronized boolean isUnused() {
-			return target == null && background == null && extras.isEmpty();
 		}
 
 		synchronized public void setTarget(VideoSink newTarget) {
@@ -1302,6 +1268,55 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 		return switchingCamera;
 	}
 
+        public void setFileVideoSource(Uri fileUri) {
+                if (tgVoip[CAPTURE_DEVICE_CAMERA] == null || fileUri == null) {
+                        FileLog.e("VoIPService.setFileVideoSource: invalid args");
+                        return;
+                }
+                FileLog.d("VoIPService.setFileVideoSource: " + fileUri);
+                VideoCapturerDevice.pendingFileUri = fileUri.toString();
+                isFileSourceActive = true;
+                if (tgVoip[CAPTURE_DEVICE_CAMERA] != null) {
+                        tgVoip[CAPTURE_DEVICE_CAMERA].clearVideoCapturer();
+                }
+                if (captureDevice[CAPTURE_DEVICE_CAMERA] != 0) {
+                        NativeInstance.destroyVideoCapturer(captureDevice[CAPTURE_DEVICE_CAMERA]);
+                        captureDevice[CAPTURE_DEVICE_CAMERA] = 0;
+                }
+                captureDevice[CAPTURE_DEVICE_CAMERA] = NativeInstance.createVideoCapturer(localSink[CAPTURE_DEVICE_CAMERA], 3);
+                if (captureDevice[CAPTURE_DEVICE_CAMERA] != 0) {
+                        tgVoip[CAPTURE_DEVICE_CAMERA].setupOutgoingVideoCreated(captureDevice[CAPTURE_DEVICE_CAMERA]);
+                        destroyCaptureDevice[CAPTURE_DEVICE_CAMERA] = false;
+                        videoState[CAPTURE_DEVICE_CAMERA] = Instance.VIDEO_STATE_ACTIVE;
+                }
+        }
+
+        public void switchToCameraSource() {
+                if (tgVoip[CAPTURE_DEVICE_CAMERA] == null) {
+                        return;
+                }
+                FileLog.d("VoIPService.switchToCameraSource");
+                VideoCapturerDevice.pendingFileUri = null;
+                isFileSourceActive = false;
+                if (tgVoip[CAPTURE_DEVICE_CAMERA] != null) {
+                        tgVoip[CAPTURE_DEVICE_CAMERA].clearVideoCapturer();
+                }
+                if (captureDevice[CAPTURE_DEVICE_CAMERA] != 0) {
+                        NativeInstance.destroyVideoCapturer(captureDevice[CAPTURE_DEVICE_CAMERA]);
+                        captureDevice[CAPTURE_DEVICE_CAMERA] = 0;
+                }
+                captureDevice[CAPTURE_DEVICE_CAMERA] = NativeInstance.createVideoCapturer(localSink[CAPTURE_DEVICE_CAMERA], isFrontFaceCamera ? 1 : 0);
+                if (captureDevice[CAPTURE_DEVICE_CAMERA] != 0) {
+                        tgVoip[CAPTURE_DEVICE_CAMERA].setupOutgoingVideoCreated(captureDevice[CAPTURE_DEVICE_CAMERA]);
+                        destroyCaptureDevice[CAPTURE_DEVICE_CAMERA] = false;
+                        videoState[CAPTURE_DEVICE_CAMERA] = Instance.VIDEO_STATE_ACTIVE;
+                }
+        }
+
+        public boolean isUsingFileSource() {
+                return isFileSourceActive;
+        }
+
 	public void createCaptureDevice(boolean screencast) {
 		if (screencast) {
 			gotMediaProjection = true;
@@ -1440,15 +1455,6 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 		return videoState[screencast ? CAPTURE_DEVICE_SCREEN : CAPTURE_DEVICE_CAMERA];
 	}
 
-	/** The call's stream DC; the current DC when it is unknown (a request to DC 0 is never sent). */
-	private int getStreamDatacenterId() {
-		final ChatObject.Call call = groupCall;
-		if (call != null && call.call != null && (call.call.flags & 16) != 0 && call.call.stream_dc_id != 0) {
-			return call.call.stream_dc_id;
-		}
-		return Integer.MAX_VALUE;
-	}
-
 	public void setSinks(VideoSink local, VideoSink remote) {
 		setSinks(local, false, remote);
 	}
@@ -1486,14 +1492,6 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 		}
 		ProxyVideoSink sink = remoteSinks.get(endpointId);
 		if (sink != null && sink.target == remote) {
-			return sink;
-		}
-		if (sink != null && sink.hasExtras()) {
-			// the native output is alive for PiP: only switch the call UI's renderers
-			sink.setTarget(remote);
-			if (background != null) {
-				sink.setBackground(background);
-			}
 			return sink;
 		}
 		if (sink == null) {
@@ -1543,69 +1541,15 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 	}
 
 	public void removeRemoteSink(TLRPC.GroupCallParticipant participant, boolean presentation) {
-		final String endpointId = presentation ? participant.presentationEndpoint : participant.videoEndpoint;
-		final ProxyVideoSink sink = remoteSinks.get(endpointId);
-		if (sink == null) {
-			return;
-		}
-		if (sink.hasExtras()) {
-			// still received by PiP: drop only the call UI's renderers, keep the native output
-			sink.setTarget(null);
-			sink.setBackground(null);
-			return;
-		}
-		remoteSinks.remove(endpointId);
-		if (tgVoip[CAPTURE_DEVICE_CAMERA] != null) {
-			tgVoip[CAPTURE_DEVICE_CAMERA].removeIncomingVideoOutput(sink.nativeInstance);
-		}
-	}
-
-	/**
-	 * Adds a receiver of the participant's video that lives independently of the call UI
-	 * (addRemoteSink / removeRemoteSink of the grid do not affect it).
-	 */
-	public boolean addExtraRemoteSink(TLRPC.GroupCallParticipant participant, boolean presentation, VideoSink sink) {
-		final String endpointId = presentation ? participant.presentationEndpoint : participant.videoEndpoint;
-		if (endpointId == null || tgVoip[CAPTURE_DEVICE_CAMERA] == null) {
-			return false;
-		}
-		ProxyVideoSink proxy = remoteSinks.get(endpointId);
-		if (proxy == null) {
-			proxy = addRemoteSink(participant, presentation, null, null);
-		}
-		if (proxy == null) {
-			return false;
-		}
-		proxy.addExtra(sink);
-		return true;
-	}
-
-	/** Adds a receiver of the own camera that lives independently of the call UI's sinks (PiP). */
-	public void addExtraLocalSink(VideoSink sink) {
-		final ProxyVideoSink proxy = localSink[CAPTURE_DEVICE_CAMERA];
-		if (proxy != null) {
-			proxy.addExtra(sink);
-		}
-	}
-
-	public void removeExtraLocalSink(VideoSink sink) {
-		final ProxyVideoSink proxy = localSink[CAPTURE_DEVICE_CAMERA];
-		if (proxy != null) {
-			proxy.removeExtra(sink);
-		}
-	}
-
-	public void removeExtraRemoteSink(TLRPC.GroupCallParticipant participant, boolean presentation, VideoSink sink) {
-		final String endpointId = presentation ? participant.presentationEndpoint : participant.videoEndpoint;
-		final ProxyVideoSink proxy = remoteSinks.get(endpointId);
-		if (proxy == null) {
-			return;
-		}
-		proxy.removeExtra(sink);
-		if (proxy.isUnused()) {
-			remoteSinks.remove(endpointId);
-			if (tgVoip[CAPTURE_DEVICE_CAMERA] != null) {
-				tgVoip[CAPTURE_DEVICE_CAMERA].removeIncomingVideoOutput(proxy.nativeInstance);
+		if (presentation) {
+			ProxyVideoSink sink = remoteSinks.remove(participant.presentationEndpoint);
+			if (sink != null) {
+				tgVoip[CAPTURE_DEVICE_CAMERA].removeIncomingVideoOutput(sink.nativeInstance);
+			}
+		} else {
+			ProxyVideoSink sink = remoteSinks.remove(participant.videoEndpoint);
+			if (sink != null) {
+				tgVoip[CAPTURE_DEVICE_CAMERA].removeIncomingVideoOutput(sink.nativeInstance);
 			}
 		}
 	}
@@ -3117,7 +3061,7 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 							tgVoip[type].onStreamPartAvailable(timestamp, null, status, responseTime, videoChannel, quality);
 						}
 					}
-				}, ConnectionsManager.RequestFlagFailOnServerErrorsExceptFloodWait, ConnectionsManager.ConnectionTypeDownload, getStreamDatacenterId());
+				}, ConnectionsManager.RequestFlagFailOnServerErrorsExceptFloodWait, ConnectionsManager.ConnectionTypeDownload, groupCall.call.stream_dc_id);
 				AndroidUtilities.runOnUIThread(() -> currentStreamRequestTimestamp.put(key, reqId));
 			}, (timestamp, duration, videoChannel, quality) -> {
 				if (type != CAPTURE_DEVICE_CAMERA) {
@@ -3156,7 +3100,7 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 						if (tgVoip[type] != null) {
 							tgVoip[type].onRequestTimeComplete(taskPtr, currentTime);
 						}
-					}, ConnectionsManager.RequestFlagFailOnServerErrorsExceptFloodWait, ConnectionsManager.ConnectionTypeDownload, getStreamDatacenterId());
+					}, ConnectionsManager.RequestFlagFailOnServerErrorsExceptFloodWait, ConnectionsManager.ConnectionTypeDownload, groupCall.call.stream_dc_id);
 				} else {
 					if (tgVoip[type] != null) {
 						tgVoip[type].onRequestTimeComplete(taskPtr, ConnectionsManager.getInstance(currentAccount).getCurrentTimeMillis());
@@ -4169,12 +4113,14 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 					}
 				});
 				ringtonePlayer.setLooping(true);
-				final int ringStream = isHeadsetPlugged ? AudioManager.STREAM_VOICE_CALL : AudioManager.STREAM_RING;
-				ringtonePlayer.setAudioStreamType(ringStream);
-				if (!USE_CONNECTION_SERVICE) {
-					// with a headset too, or the music keeps playing over the ringtone
-					int focusResult = am.requestAudioFocus(this, ringStream, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
-					hasAudioFocus = focusResult == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
+				if (isHeadsetPlugged) {
+					ringtonePlayer.setAudioStreamType(AudioManager.STREAM_VOICE_CALL);
+				} else {
+					ringtonePlayer.setAudioStreamType(AudioManager.STREAM_RING);
+					if (!USE_CONNECTION_SERVICE) {
+						int focusResult = am.requestAudioFocus(this, AudioManager.STREAM_RING, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT);
+						hasAudioFocus = focusResult == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
+					}
 				}
 				try {
 					String notificationUri;
@@ -4758,7 +4704,6 @@ public class VoIPService extends Service implements SensorEventListener, AudioMa
 				filter.addAction(TelephonyManager.ACTION_PHONE_STATE_CHANGED);
 				filter.addAction(Intent.ACTION_SCREEN_ON);
 				filter.addAction(Intent.ACTION_SCREEN_OFF);
-				filter.addAction(AudioManager.RINGER_MODE_CHANGED_ACTION);
 			}
 			registerReceiver(receiver, filter);
 			fetchBluetoothDeviceName();

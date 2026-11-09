@@ -83,8 +83,12 @@ import org.telegram.messenger.SharedConfig;
 import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.UserObject;
 import org.telegram.messenger.Utilities;
-import org.telegram.utils.pip.PipEnvironment;
-import org.telegram.ui.Components.voip.VoIPPipContent;
+import org.telegram.messenger.pip.activity.IPipActivityActionListener;
+import org.telegram.messenger.pip.source.IPipSourceDelegate;
+import org.telegram.messenger.pip.utils.PipActions;
+import org.telegram.messenger.pip.utils.PipPermissions;
+import org.telegram.messenger.pip.PipSource;
+import org.telegram.messenger.pip.utils.PipUtils;
 import org.telegram.messenger.voip.EncryptionKeyEmojifier;
 import org.telegram.messenger.voip.Instance;
 import org.telegram.messenger.voip.VideoCapturerDevice;
@@ -147,12 +151,15 @@ import java.util.Map;
 
 public class VoIPFragment implements
     VoIPService.StateListener,
-    NotificationCenter.NotificationCenterDelegate
+    NotificationCenter.NotificationCenterDelegate,
+    IPipSourceDelegate
 {
 
     private final static int STATE_GONE = 0;
     private final static int STATE_FULLSCREEN = 1;
     private final static int STATE_FLOATING = 2;
+    private static final int REQUEST_CODE_PICK_VIDEO_FILE = 0x0F0F;
+    private FrameLayout fakeCameraButton;
 
     private final int currentAccount;
 
@@ -207,6 +214,7 @@ public class VoIPFragment implements
     private AcceptDeclineView acceptDeclineView;
     private boolean isNearEar;
 
+    private PipSource pipSource;
 
     View bottomShadow;
     View topShadow;
@@ -359,30 +367,6 @@ public class VoIPFragment implements
                 return super.dispatchKeyEvent(event);
             }
 
-            // the app opts into predictive back: KEYCODE_BACK does not reach this window on 13+
-            private Object backCallback;
-
-            @Override
-            protected void onAttachedToWindow() {
-                super.onAttachedToWindow();
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && backCallback == null) {
-                    backCallback = BackCallbacks.register(this, () -> {
-                        if (!fragment.isFinished && !fragment.switchingToPip && !fragment.lockOnScreen) {
-                            fragment.onBackPressed();
-                        }
-                    });
-                }
-            }
-
-            @Override
-            protected void onDetachedFromWindow() {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && backCallback != null) {
-                    BackCallbacks.unregister(this, backCallback);
-                    backCallback = null;
-                }
-                super.onDetachedFromWindow();
-            }
-
             @Override
             public void draw(@NonNull Canvas canvas) {
                 if (fragment.windowViewSkipRender) {
@@ -441,7 +425,16 @@ public class VoIPFragment implements
             fragment.updateSystemBarColors();
         }
 
-        VoIPPipContent.update();
+        final VoIPService service = VoIPService.getSharedInstance();
+        if (service != null && service.getRemoteVideoState() == Instance.VIDEO_STATE_ACTIVE) {
+            if (PipUtils.checkPermissions(activity) == PipPermissions.PIP_GRANTED_PIP) {
+                instance.pipSource = new PipSource.Builder(activity, instance)
+                    .setTagPrefix("voip-fragment-pip")
+                    .setContentView(instance.callingUserTextureView.renderer)
+                    .setPlaceholderView(instance.callingUserTextureView.getPlaceholderView())
+                    .build();
+            }
+        }
     }
 
     private void onBackPressed() {
@@ -467,8 +460,11 @@ public class VoIPFragment implements
                 return;
             }
             if (canSwitchToPip && (VoIPService.getSharedInstance() != null && !VoIPService.getSharedInstance().isConverting()) && !lockOnScreen) {
-                // the bubble is shown in the app without any permission
-                switchToPip();
+                if (PipUtils.checkAnyPipPermissions(activity)) {
+                    switchToPip();
+                } else {
+                    requestInlinePermissions();
+                }
             } else {
                 windowView.finish();
             }
@@ -497,7 +493,6 @@ public class VoIPFragment implements
             instance.destroy();
         }
         instance = null;
-        VoIPPipContent.update();
     }
 
     public static VoIPFragment getInstance() {
@@ -539,11 +534,11 @@ public class VoIPFragment implements
         isOutgoing = state.isOutgoing();
         previousState = -1;
         currentState = state.getCallState();
-        NotificationCenter.getGlobalInstance().addWeakObserver(this, NotificationCenter.webRtcSpeakerAmplitudeEvent);
-        NotificationCenter.getInstance(currentAccount).addWeakObserver(this, NotificationCenter.voipServiceCreated);
-        NotificationCenter.getGlobalInstance().addWeakObserver(this, NotificationCenter.emojiLoaded);
-        NotificationCenter.getGlobalInstance().addWeakObserver(this, NotificationCenter.closeInCallActivity);
-        NotificationCenter.getGlobalInstance().addWeakObserver(this, NotificationCenter.nearEarEvent);
+        NotificationCenter.getGlobalInstance().addObserver(this, NotificationCenter.webRtcSpeakerAmplitudeEvent);
+        NotificationCenter.getInstance(currentAccount).addObserver(this, NotificationCenter.voipServiceCreated);
+        NotificationCenter.getGlobalInstance().addObserver(this, NotificationCenter.emojiLoaded);
+        NotificationCenter.getGlobalInstance().addObserver(this, NotificationCenter.closeInCallActivity);
+        NotificationCenter.getGlobalInstance().addObserver(this, NotificationCenter.nearEarEvent);
     }
 
     private void destroy() {
@@ -555,6 +550,10 @@ public class VoIPFragment implements
         NotificationCenter.getGlobalInstance().removeObserver(this, NotificationCenter.emojiLoaded);
         NotificationCenter.getGlobalInstance().removeObserver(this, NotificationCenter.closeInCallActivity);
         NotificationCenter.getGlobalInstance().removeObserver(this, NotificationCenter.nearEarEvent);
+        if (pipSource != null) {
+            pipSource.destroy();
+            pipSource = null;
+        }
         if (addPeopleSheet != null) {
             addPeopleSheet.dismiss();
             addPeopleSheet = null;
@@ -628,7 +627,19 @@ public class VoIPFragment implements
         if (videoState == Instance.VIDEO_STATE_ACTIVE && !isVideoCall) {
             isVideoCall = true;
         }
-        VoIPPipContent.update();
+        final VoIPService service = VoIPService.getSharedInstance();
+        if (service != null && service.getRemoteVideoState() == Instance.VIDEO_STATE_ACTIVE) {
+            if (pipSource == null && PipUtils.checkPermissions(activity) == PipPermissions.PIP_GRANTED_PIP) {
+                pipSource = new PipSource.Builder(activity, instance)
+                    .setTagPrefix("voip-fragment-pip")
+                    .setContentView(callingUserTextureView.renderer)
+                    .setPlaceholderView(callingUserTextureView.getPlaceholderView())
+                    .build();
+            }
+        } else if (pipSource != null) {
+            pipSource.destroy();
+            pipSource = null;
+        }
         updateViewState();
     }
 
@@ -829,6 +840,35 @@ public class VoIPFragment implements
         frameLayout.setBackgroundColor(0xff000000);
         updateSystemBarColors();
         fragmentView = frameLayout;
+
+        // === Fake camera button (Telegram-Virtual) ===
+        fakeCameraButton = new FrameLayout(context);
+        {
+            GradientDrawable fcbBg = new GradientDrawable();
+            fcbBg.setColor(0x99000000);
+            fcbBg.setCornerRadius(AndroidUtilities.dp(10));
+            fakeCameraButton.setBackground(fcbBg);
+            fakeCameraButton.setClickable(true);
+            fakeCameraButton.setOnClickListener(v -> openFileVideoPicker());
+
+            TextView fcbLabel = new TextView(context);
+            fcbLabel.setText("🎥 تشغيل فيديو");
+            fcbLabel.setTextColor(0xFFFFFFFF);
+            fcbLabel.setTextSize(13);
+            fcbLabel.setGravity(Gravity.CENTER);
+            fakeCameraButton.addView(fcbLabel, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+            int fcbInsetTop = (lastInsets != null) ? lastInsets.getSystemWindowInsetTop() : AndroidUtilities.statusBarHeight;
+            FrameLayout.LayoutParams fcbLp = new FrameLayout.LayoutParams(AndroidUtilities.dp(150), AndroidUtilities.dp(44));
+            fcbLp.gravity = Gravity.TOP | Gravity.RIGHT;
+            fcbLp.topMargin = AndroidUtilities.dp(56) + fcbInsetTop;
+            fcbLp.rightMargin = AndroidUtilities.dp(16);
+            fragmentView.addView(fakeCameraButton, fcbLp);
+
+            updateFakeCameraButtonLabel();
+        }
+        // === end fake camera button ===
+
 
         VoIPServiceState state = VoIPService.getSharedState();
         gradientLayout = new VoIpGradientLayout(context, state != null && state.isConference(), backgroundProvider);
@@ -1440,13 +1480,16 @@ public class VoIPFragment implements
         callingUserTextureView.renderer.init(VideoCapturerDevice.getEglBase().getEglBaseContext(), new RendererCommon.RendererEvents() {
             @Override
             public void onFirstFrameRendered() {
+                if (firstFrameCallback != null) {
+                    firstFrameCallback.run();
+                    firstFrameCallback = null;
+                }
                 AndroidUtilities.runOnUIThread(() -> updateViewState());
             }
 
             @Override
             public void onFrameResolutionChanged(int videoWidth, int videoHeight, int rotation) {
-                // system PiP aspect ratio follows the remote video
-                AndroidUtilities.runOnUIThread(VoIPPipContent::update);
+
             }
 
         }, EglBase.CONFIG_PLAIN, new GlRectDrawer());
@@ -1502,7 +1545,6 @@ public class VoIPFragment implements
                     VoIPPiPView.switchingToPip = false;
                     switchingToPip = false;
                     instance = null;
-                    VoIPPipContent.update();
                 }, 200);
             }
         });
@@ -2266,6 +2308,10 @@ public class VoIPFragment implements
         if (currentState == VoIPService.STATE_ESTABLISHED) {
             AndroidUtilities.runOnUIThread(stopAnimatingBgRunnable, 10000);
         }
+
+        if (pipSource != null) {
+            pipSource.invalidateActions();
+        }
     }
 
     private void showUi(boolean show) {
@@ -2828,6 +2874,44 @@ public class VoIPFragment implements
         }
     }
 
+    private void openFileVideoPicker() {
+        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+        intent.setType("video/mp4");
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        if (activity != null) {
+            activity.startActivityForResult(intent, REQUEST_CODE_PICK_VIDEO_FILE);
+        }
+    }
+
+    private void updateFakeCameraButtonLabel() {
+        if (fakeCameraButton == null || fakeCameraButton.getChildCount() == 0) return;
+        VoIPService service = VoIPService.getSharedInstance();
+        boolean isFile = service != null && service.isUsingFileSource();
+        View child = fakeCameraButton.getChildAt(0);
+        if (child instanceof TextView) {
+            ((TextView) child).setText(isFile
+                ? "📷 رجوع للكاميرا"
+                : "🎥 تشغيل فيديو");
+        }
+    }
+
+    public static void onVideoFilePickerResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode != REQUEST_CODE_PICK_VIDEO_FILE) return;
+        VoIPFragment instance = getInstance();
+        if (instance == null) return;
+        if (resultCode == Activity.RESULT_OK && data != null && data.getData() != null) {
+            VoIPService service = VoIPService.getSharedInstance();
+            if (service != null) {
+                if (service.isUsingFileSource()) {
+                    service.switchToCameraSource();
+                } else {
+                    service.setFileVideoSource(data.getData());
+                }
+                instance.updateFakeCameraButtonLabel();
+            }
+        }
+    }
+
     public void onScreenCastStart() {
         if (previewDialog == null) {
             return;
@@ -2997,10 +3081,10 @@ public class VoIPFragment implements
         boolean screenOn;
         screenOn = pm.isInteractive();
 
-        final boolean overlay = PipEnvironment.canDrawOverlays(activity);
-        final boolean hasPermissionsToPip = overlay || PipEnvironment.canUseSystemPip(activity);
+        final @PipPermissions int permissions = PipUtils.checkPermissions(activity);
+        final boolean hasPermissionsToPip = permissions > 0;
 
-        if (canSwitchToPip && (VoIPService.getSharedInstance() != null && !VoIPService.getSharedInstance().isConverting()) && overlay) {
+        if (canSwitchToPip && (VoIPService.getSharedInstance() != null && !VoIPService.getSharedInstance().isConverting()) && permissions == PipPermissions.PIP_GRANTED_OVERLAY) {
             int h = instance.windowView.getMeasuredHeight();
             VoIPPiPView.show(instance.activity, instance.currentAccount, instance.windowView.getMeasuredWidth(), h, VoIPPiPView.ANIMATION_ENTER_TYPE_SCALE);
             if (instance.lastInsets != null) {
@@ -3090,51 +3174,89 @@ public class VoIPFragment implements
     }
 
     private VoIPTextureView pipTextureView;
+    private Runnable firstFrameCallback;
     private boolean windowViewSkipRender;
 
-    /* utils.pip: system PiP shows the remote video in a view owned by VoIPPipContent */
+    @Override
+    public Bitmap pipCreatePrimaryWindowViewBitmap() {
+        if (callingUserTextureView == null || !callingUserTextureView.renderer.isAvailable()) {
+            return null;
+        }
 
-    public View getCallingUserVideoView() {
-        return callingUserTextureView;
+        return callingUserTextureView.renderer.getBitmap();
     }
 
-    public void enterSystemPip(VoIPTextureView view) {
-        pipTextureView = view;
+    @Override
+    public void pipRenderBackground(Canvas canvas) {
+        canvas.drawColor(0xff1b1f23);
+    }
+
+    @Override
+    public View pipCreatePictureInPictureView() {
+        pipTextureView = new VoIPTextureView(activity, false, true, false, false);
+        pipTextureView.renderer.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT);
+        pipTextureView.renderer.setEnableHardwareScaler(true);
+        pipTextureView.renderer.setRotateTextureWithScreen(true);
+        pipTextureView.scaleType = VoIPTextureView.SCALE_TYPE_FIT;
+        pipTextureView.renderer.init(VideoCapturerDevice.getEglBase().getEglBaseContext(), new RendererCommon.RendererEvents() {
+            @Override
+            public void onFirstFrameRendered() {
+                if (firstFrameCallback != null) {
+                    firstFrameCallback.run();
+                    firstFrameCallback = null;
+                }
+            }
+
+            @Override
+            public void onFrameResolutionChanged(int videoWidth, int videoHeight, int rotation) {
+
+            }
+        });
+        if (pipTextureView.backgroundView != null) {
+            pipTextureView.backgroundView.setVisibility(View.GONE);
+        }
+
+        return pipTextureView;
+    }
+
+    @Override
+    public void pipHidePrimaryWindowView(Runnable firstFrameCallback) {
+        this.firstFrameCallback = firstFrameCallback;
+        if (callingUserTextureView != null) {
+            callingUserTextureView.renderer.clearFirstFrame();
+        }
+
         windowViewSkipRender = true;
         updateViewState();
-        try {
-            WindowManager wm = (WindowManager) activity.getSystemService(Context.WINDOW_SERVICE);
-            wm.removeView(windowView);
-        } catch (Exception e) {
-            FileLog.e(e);
-        }
-    }
 
-    public void exitSystemPip() {
-        try {
-            if (windowView.getParent() == null) {
-                WindowManager wm = (WindowManager) activity.getSystemService(Context.WINDOW_SERVICE);
-                wm.addView(windowView, windowView.createWindowLayoutParams());
-            }
-        } catch (Exception e) {
-            FileLog.e(e);
-        }
-        windowViewSkipRender = false;
-        pipTextureView = null;
-        updateViewState();
+        WindowManager wm = (WindowManager) activity.getSystemService(Context.WINDOW_SERVICE);
+        wm.removeView(windowView);
         windowView.invalidate();
     }
 
-    /** System PiP was closed by the user: drop the call screen, the call goes on. */
-    public void closeWithoutPip() {
-        isFinished = true;
-        callingUserTextureView.renderer.release();
-        currentUserTextureView.renderer.release();
-        callingUserMiniTextureRenderer.release();
-        destroy();
-        windowView.finishImmediate();
-        instance = null;
-        VoIPPipContent.update();
+    @Override
+    public Bitmap pipCreatePictureInPictureViewBitmap() {
+        if (pipTextureView == null || !pipTextureView.renderer.isAvailable()) {
+            return null;
+        }
+
+        return pipTextureView.renderer.getBitmap();
+    }
+
+    @Override
+    public void pipShowPrimaryWindowView(Runnable firstFrameCallback) {
+        this.firstFrameCallback = firstFrameCallback;
+        WindowManager wm = (WindowManager) activity.getSystemService(Context.WINDOW_SERVICE);
+        wm.addView(windowView, windowView.createWindowLayoutParams());
+
+        windowViewSkipRender = false;
+        updateViewState();
+        windowView.invalidate();
+
+        if (pipTextureView != null) {
+            pipTextureView.renderer.release();
+            pipTextureView = null;
+        }
     }
 
     private static class ConferenceParticipantsView extends View {
@@ -3201,27 +3323,6 @@ public class VoIPFragment implements
             canvas.translate(avatarsDrawable.getMaxX() + dp(7), 0);
             text.draw(canvas, 0, height / 2.0f, 0xFFFFFFFF, 1.0f);
             canvas.restore();
-        }
-    }
-
-    /** Predictive back callbacks of the call window, isolated from API 23 class verification. */
-    @androidx.annotation.RequiresApi(api = Build.VERSION_CODES.TIRAMISU)
-    private static final class BackCallbacks {
-        static @androidx.annotation.Nullable Object register(@NonNull View view, @NonNull Runnable onBack) {
-            final android.window.OnBackInvokedDispatcher dispatcher = view.findOnBackInvokedDispatcher();
-            if (dispatcher == null) {
-                return null;
-            }
-            final android.window.OnBackInvokedCallback callback = onBack::run;
-            dispatcher.registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback);
-            return callback;
-        }
-
-        static void unregister(@NonNull View view, @NonNull Object callback) {
-            final android.window.OnBackInvokedDispatcher dispatcher = view.findOnBackInvokedDispatcher();
-            if (dispatcher != null) {
-                dispatcher.unregisterOnBackInvokedCallback((android.window.OnBackInvokedCallback) callback);
-            }
         }
     }
 }

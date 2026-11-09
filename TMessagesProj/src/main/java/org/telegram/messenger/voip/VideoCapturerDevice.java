@@ -5,6 +5,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.graphics.Point;
 import android.media.projection.MediaProjection;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -22,6 +23,7 @@ import org.webrtc.CapturerObserver;
 import org.webrtc.EglBase;
 import org.webrtc.Logging;
 import org.webrtc.ScreenCapturerAndroid;
+import org.webrtc.MP4FileVideoCapturer;
 import org.webrtc.SurfaceTextureHelper;
 import org.webrtc.VideoCapturer;
 import org.webrtc.voiceengine.WebRtcAudioRecord;
@@ -35,6 +37,7 @@ public class VideoCapturerDevice {
     public static EglBase eglBase;
 
     public static Intent mediaProjectionPermissionResultData;
+    public static String pendingFileUri = null;
 
     private VideoCapturer videoCapturer;
     private SurfaceTextureHelper videoCapturerSurfaceTextureHelper;
@@ -140,7 +143,37 @@ public class VideoCapturerDevice {
                 return;
             }
             nativePtr = ptr;
-            if ("screen".equals(deviceName)) {
+            if ("file".equals(deviceName)) {
+                // MP4FileVideoCapturer branch
+                String uriStr = pendingFileUri;
+                pendingFileUri = null;
+                if (uriStr == null) {
+                    FileLog.e("VideoCapturerDevice init: file mode requested but pendingFileUri is null");
+                    return;
+                }
+                try {
+                    Uri uri = Uri.parse(uriStr);
+                    if (videoCapturer == null) {
+                        videoCapturer = new MP4FileVideoCapturer(ApplicationLoader.applicationContext, uri);
+                        videoCapturerSurfaceTextureHelper = SurfaceTextureHelper.create(
+                                "MP4FileCapturerThread", eglBase.getEglBaseContext());
+                        handler.post(() -> {
+                            if (videoCapturerSurfaceTextureHelper == null || nativePtr == 0) {
+                                return;
+                            }
+                            nativeCapturerObserver = nativeGetJavaVideoCapturerObserver(nativePtr);
+                            videoCapturer.initialize(
+                                    videoCapturerSurfaceTextureHelper,
+                                    ApplicationLoader.applicationContext,
+                                    nativeCapturerObserver);
+                            FileLog.d("VideoCapturerDevice init(" + ptr + "): MP4FileVideoCapturer startCapture");
+                            videoCapturer.startCapture(CAPTURE_WIDTH, CAPTURE_HEIGHT, CAPTURE_FPS);
+                        });
+                    }
+                } catch (Exception e) {
+                    FileLog.e("VideoCapturerDevice init: failed to start MP4FileVideoCapturer", e);
+                }
+            } else if ("screen".equals(deviceName)) {
                 if (Build.VERSION.SDK_INT < 21) {
                     return;
                 }

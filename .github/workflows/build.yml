@@ -1,0 +1,45 @@
+name: Build Telegram APK
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: recursive
+        fetch-depth: 1
+    - uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+    - uses: android-actions/setup-android@v3
+      with:
+        packages: 'platform-tools'
+    - run: |
+        yes | sdkmanager --licenses > /dev/null 2>&1 || true
+        sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+    - run: |
+        echo "sdk.dir=$ANDROID_HOME" > local.properties
+        echo "ndk.dir=$ANDROID_HOME/ndk/27.2.12479018" >> local.properties
+    - run: |
+        mkdir -p TMessagesProj/config
+        keytool -genkey -v -keystore TMessagesProj/config/release.keystore -alias androidkey -keyalg RSA -keysize 2048 -validity 10000 -storepass 123456 -keypass 123456 -dname "CN=Telegram, OU=Telegram, O=Telegram, L=Cairo, S=Cairo, C=EG"
+        echo '{"project_info":{"project_number":"1","project_id":"1","storage_bucket":"1"},"client":[{"client_info":{"mobilesdk_app_id":"1","android_client_info":{"package_name":"org.telegram.messenger"}},"oauth_client":[],"api_key":[{"current_key":"1"}],"services":{"appinvite_service":{"other_platform_oauth_client":[]}}}]}' > TMessagesProj/google-services.json
+        echo "RELEASE_STORE_FILE=TMessagesProj/config/release.keystore" > gradle.properties
+        echo "RELEASE_STORE_PASSWORD=123456" >> gradle.properties
+        echo "RELEASE_KEY_ALIAS=androidkey" >> gradle.properties
+        echo "RELEASE_KEY_PASSWORD=123456" >> gradle.properties
+        echo "org.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=2g -Dfile.encoding=UTF-8" >> gradle.properties
+        echo "android.suppressUnsupportedCompileSdk=36" >> gradle.properties
+    - run: |
+        chmod +x gradlew
+        ./gradlew assembleAfatDebug -x lint --no-daemon --stacktrace
+    - uses: actions/upload-artifact@v4
+      with:
+        name: telegram-apk
+        path: TMessagesProj_App/build/outputs/apk/afat/debug/app.apk
+        retention-days: 30

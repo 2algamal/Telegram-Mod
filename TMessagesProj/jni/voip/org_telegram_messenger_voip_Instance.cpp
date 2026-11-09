@@ -1194,16 +1194,18 @@ JNIEXPORT void JNICALL Java_org_telegram_messenger_voip_NativeInstance_onMediaDe
 extern "C"
 JNIEXPORT jlong JNICALL Java_org_telegram_messenger_voip_NativeInstance_createVideoCapturer(JNIEnv *env, jclass clazz, jobject localSink, jint type) {
     initWebRTC(env);
-
-    const bool screencast = type != 0 && type != 1;
-    auto platformContext = std::make_shared<AndroidContext>(env, nullptr, nullptr, screencast);
-
-    std::unique_ptr<VideoCaptureInterface> capture;
-    if (!screencast) {
-        capture = tgcalls::VideoCaptureInterface::Create(StaticThreads::getThreads(), type == 1 ? "front" : "back", false, platformContext);
-    } else {
-        capture = tgcalls::VideoCaptureInterface::Create(StaticThreads::getThreads(), "screen", true, platformContext);
+    std::string deviceId;
+    bool isScreencast = false;
+    switch (type) {
+        case 0: deviceId = "back"; break;
+        case 1: deviceId = "front"; break;
+        case 2: deviceId = "screen"; isScreencast = true; break;
+        case 3: deviceId = "file"; break;
+        default: deviceId = "back"; break;
     }
+    auto platformContext = std::make_shared<AndroidContext>(env, nullptr, nullptr, isScreencast);
+    std::unique_ptr<VideoCaptureInterface> capture;
+    capture = tgcalls::VideoCaptureInterface::Create(StaticThreads::getThreads(), deviceId, isScreencast, platformContext);
     if (!capture) {
         return 0;
     }
